@@ -352,7 +352,7 @@ private:
 	uint32_t m_status;              // currently playing?
 	uint32_t m_curnibble;           // index of the current nibble
 	uint32_t m_curbyte;             // current byte of data
-	uint32_t m_dummy_read;          // dummy read tracker
+	uint32_t m_read_buff;			// read buffer for external read
 	uint32_t m_position;            // current fractional position
 	uint32_t m_curaddress;          // current address
 	int32_t m_accumulator;          // accumulator
