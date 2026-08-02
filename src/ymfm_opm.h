@@ -180,6 +180,7 @@ public:
 	uint32_t debug_lfo_phase() const { return m_lfo_phase; }
 	uint32_t debug_lfo_am() const { return m_lfo_am; }
 	uint32_t debug_noise_lfsr() const { return m_noise_lfsr; }
+	uint32_t debug_lfo_noise() const { return m_lfo_noise; }
 
 	// the PM value is returned by clock_noise_and_lfo() rather than kept, so
 	// recompute it from the current phase for debugging
