@@ -230,8 +230,11 @@ protected:
 	}
 
 	// internal state
-	uint32_t m_lfo_counter;               // LFO counter
 	uint32_t m_noise_lfsr;                // noise LFSR state
+	uint16_t m_lfo_coarse;                // LFO coarse counter (15 bits)
+	uint8_t m_lfo_prescaler;              // LFO prescaler (4 bits)
+	uint8_t m_lfo_fine;                   // LFO fine counter (4 bits)
+	uint8_t m_lfo_phase;                  // LFO phase (8 bits)
 	uint8_t m_noise_counter;              // noise counter
 	uint8_t m_noise_state;                // latched noise state
 	uint8_t m_noise_lfo;                  // latched LFO noise value

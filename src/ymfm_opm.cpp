@@ -39,12 +39,30 @@ namespace ymfm
 //*********************************************************
 
 //-------------------------------------------------
+//  s_lfo_preload - preload values for the 15-bit
+//  LFO coarse counter, indexed by the upper 4 bits
+//  of the LFO rate
+//-------------------------------------------------
+
+// the counter counts up until it overflows, so a preload of
+// 0x8000 - (1 << (15 - hi)) yields 2^(15-hi) ticks per LFO clock
+static uint16_t const s_lfo_preload[16] =
+{
+	0x0000, 0x4000, 0x6000, 0x7000, 0x7800, 0x7c00, 0x7e00, 0x7f00,
+	0x7f80, 0x7fc0, 0x7fe0, 0x7ff0, 0x7ff8, 0x7ffc, 0x7ffe, 0x7fff
+};
+
+
+//-------------------------------------------------
 //  opm_registers - constructor
 //-------------------------------------------------
 
 opm_registers::opm_registers() :
-	m_lfo_counter(0),
 	m_noise_lfsr(1),
+	m_lfo_coarse(0),
+	m_lfo_prescaler(0),
+	m_lfo_fine(0),
+	m_lfo_phase(0),
 	m_noise_counter(0),
 	m_noise_state(0),
 	m_noise_lfo(0),
@@ -99,7 +117,10 @@ void opm_registers::reset()
 
 void opm_registers::save_restore(ymfm_saved_state &state)
 {
-	state.save_restore(m_lfo_counter);
+	state.save_restore(m_lfo_coarse);
+	state.save_restore(m_lfo_prescaler);
+	state.save_restore(m_lfo_fine);
+	state.save_restore(m_lfo_phase);
 	state.save_restore(m_lfo_am);
 	state.save_restore(m_noise_lfsr);
 	state.save_restore(m_noise_counter);
@@ -192,19 +213,50 @@ int32_t opm_registers::clock_noise_and_lfo()
 		}
 	}
 
-	// treat the rate as a 4.4 floating-point step value with implied
-	// leading 1; this matches exactly the frequencies in the application
-	// manual, though it might not be implemented exactly this way on chip
+	// the chip divides the LFO down in three stages: a 4-bit prescaler
+	// clocked once per internal frame (16 phi1), a 15-bit coarse counter
+	// preloaded from the upper 4 bits of the rate, and a 4-bit fine counter
+	// decoded against the lower 4 bits of the rate; a sample is 2 frames, so
+	// the prescaler carries once every 8 samples
 	uint32_t rate = lfo_rate();
-	m_lfo_counter += (0x10 | bitfield(rate, 0, 4)) << bitfield(rate, 4, 4);
+	m_lfo_prescaler = (m_lfo_prescaler + 2) & 15;
+	if (m_lfo_prescaler == 0)
+	{
+		// the coarse counter reloads on overflow, giving 2^(15-hi) ticks --
+		// 8*2^(15-hi) samples -- per LFO clock
+		if (++m_lfo_coarse >= 0x8000)
+		{
+			m_lfo_coarse = s_lfo_preload[bitfield(rate, 4, 4)];
+
+			// each coarse carry also steps the fine counter; decoding it
+			// against the low 4 bits of the rate inserts an extra LFO clock
+			// one frame later, adding lo extra clocks per 16 carries, which
+			// is what makes the average rate (16+lo)/16 times the coarse rate
+			uint32_t step = 1;
+			if (bitfield(m_lfo_fine, 0) == 0)
+				step += bitfield(rate, 3);
+			else if (bitfield(m_lfo_fine, 1) == 0)
+				step += bitfield(rate, 2);
+			else if (bitfield(m_lfo_fine, 2) == 0)
+				step += bitfield(rate, 1);
+			else if (bitfield(m_lfo_fine, 3) == 0)
+				step += bitfield(rate, 0);
+			m_lfo_fine = (m_lfo_fine + 1) & 15;
+
+			// the extra clock lands within the same sample as the coarse one,
+			// so the phase can advance by 2 at once
+			m_lfo_phase = (m_lfo_phase + step) & 0xff;
+		}
+	}
 
 	// bit 1 of the test register is officially undocumented but has been
-	// discovered to hold the LFO in reset while active
+	// discovered to hold the LFO in reset while active; on the chip it forces
+	// the phase accumulator input to 0 rather than touching the counters
 	if (lfo_reset())
-		m_lfo_counter = 0;
+		m_lfo_phase = 0;
 
-	// now pull out the non-fractional LFO value
-	uint32_t lfo = bitfield(m_lfo_counter, 22, 8);
+	// now pull out the LFO value
+	uint32_t lfo = m_lfo_phase;
 
 	// fill in the noise entry 1 ahead of our current position; this
 	// ensures the current value remains stable for a full LFO clock
