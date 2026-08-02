@@ -46,9 +46,13 @@ namespace ymfm
 
 // the counter counts up until it overflows, so a preload of
 // 0x8000 - (1 << (15 - hi)) yields 2^(15-hi) ticks per LFO clock
+//
+// entry 0 is 0x1000 rather than the 0x0000 that formula gives, matching the
+// LUT in IKAOPM; this makes the slowest 16 rates run 8/7 faster than figure
+// 2.16 of the application manual specifies
 static uint16_t const s_lfo_preload[16] =
 {
-	0x0000, 0x4000, 0x6000, 0x7000, 0x7800, 0x7c00, 0x7e00, 0x7f00,
+	0x1000, 0x4000, 0x6000, 0x7000, 0x7800, 0x7c00, 0x7e00, 0x7f00,
 	0x7f80, 0x7fc0, 0x7fe0, 0x7ff0, 0x7ff8, 0x7ffc, 0x7ffe, 0x7fff
 };
 
