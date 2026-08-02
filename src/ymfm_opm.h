@@ -171,6 +171,20 @@ public:
 	// log a key-on event
 	std::string log_keyon(uint32_t choffs, uint32_t opoffs);
 
+	// simple getters for debugging
+	uint32_t debug_lfo_coarse() const { return m_lfo_coarse; }
+	uint32_t debug_lfo_fine() const { return m_lfo_fine; }
+	uint32_t debug_lfo_phase() const { return m_lfo_phase; }
+	uint32_t debug_lfo_am() const { return m_lfo_am; }
+	uint32_t debug_noise_lfsr() const { return m_noise_lfsr; }
+
+	// the PM value is returned by clock_noise_and_lfo() rather than kept, so
+	// recompute it from the current phase for debugging
+	int32_t debug_lfo_pm() const
+	{
+		return ((m_lfo_waveform[lfo_waveform()][m_lfo_phase] >> 8) * int32_t(lfo_pm_depth())) >> 7;
+	}
+
 	// system-wide registers
 	uint32_t test() const                            { return byte(0x01, 0, 8); }
 	uint32_t lfo_reset() const                       { return byte(0x01, 1, 1); }
@@ -283,6 +297,9 @@ public:
 
 	// generate one sample of sound
 	void generate(output_data *output, uint32_t numsamples = 1);
+
+	// simple getter for debugging
+	fm_engine &debug_fmengine() { return m_fm; }
 
 protected:
 	// variants
