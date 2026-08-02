@@ -156,6 +156,9 @@ public:
 	// clock the noise and LFO, if present, returning LFO PM value
 	int32_t clock_noise_and_lfo();
 
+	// advance the noise LFSR by one bit
+	void step_noise();
+
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
 
@@ -254,7 +257,7 @@ protected:
 	uint8_t m_lfo_phase;                  // LFO phase (8 bits)
 	uint8_t m_noise_counter;              // noise counter
 	uint8_t m_noise_state;                // latched noise state
-	uint8_t m_noise_lfo;                  // latched LFO noise value
+	uint16_t m_lfo_noise;                 // noise word latched by the LFO clock
 	uint8_t m_lfo_am;                     // current LFO AM value
 	uint8_t m_regdata[REGISTERS];         // register data
 	uint32_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in bits 0-7, PM magnitude in 8-15, PM sign in 16

@@ -58,6 +58,23 @@ static uint16_t const s_lfo_preload[16] =
 
 
 //-------------------------------------------------
+//  s_lfo_noise_shift - which 8 bits of the 16-bit
+//  noise word the LFO value path picks up
+//-------------------------------------------------
+
+// the noise word is shifted into the phase accumulator serially, so which
+// bits end up where the sawtooth's phase would be is a matter of how the
+// load window lines up with the multiplier's; this rotation is the one that
+// reproduces IKAOPM
+static uint32_t const s_lfo_noise_shift = 15;
+
+// and the load window opens a few phi1 after the noise timer's does, so when
+// both land on the same frame this many of the bits the noise shifts in
+// arrive too late for the LFO to see them
+static uint32_t const s_lfo_noise_lag = 2;
+
+
+//-------------------------------------------------
 //  opm_registers - constructor
 //-------------------------------------------------
 
@@ -70,7 +87,7 @@ opm_registers::opm_registers() :
 	m_lfo_phase(0),
 	m_noise_counter(0),
 	m_noise_state(0),
-	m_noise_lfo(0),
+	m_lfo_noise(0),
 	m_lfo_am(0)
 {
 	// create the waveforms
@@ -144,7 +161,7 @@ void opm_registers::save_restore(ymfm_saved_state &state)
 	state.save_restore(m_noise_flag);
 	state.save_restore(m_noise_counter);
 	state.save_restore(m_noise_state);
-	state.save_restore(m_noise_lfo);
+	state.save_restore(m_lfo_noise);
 	state.save_restore(m_regdata);
 }
 
@@ -210,6 +227,24 @@ bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint3
 
 
 //-------------------------------------------------
+//  step_noise - advance the noise LFSR by one bit
+//-------------------------------------------------
+
+void opm_registers::step_noise()
+{
+	// feedback is bit 2 XORed against the bit that fell off the bottom one
+	// step earlier; expanded over time that is the same x^17 + x^14 sequence
+	// an explicit 17-bit LFSR gives, with the extra bit of state living in
+	// m_noise_flag. the chip breaks the all-zero lockup by forcing a 1
+	// rather than by using XNOR feedback
+	uint32_t feedback = (m_noise_flag ^ bitfield(m_noise_lfsr, 2)) |
+		(m_noise_lfsr == 0 && m_noise_flag == 0);
+	m_noise_flag = bitfield(m_noise_lfsr, 0);
+	m_noise_lfsr = (m_noise_lfsr >> 1) | (feedback << 15);
+}
+
+
+//-------------------------------------------------
 //  clock_noise_and_lfo - clock the noise and LFO,
 //  handling clock division, depth, and waveform
 //  computations
@@ -222,69 +257,83 @@ int32_t opm_registers::clock_noise_and_lfo()
 	// frame, so its contents only actually change during the frames where
 	// the noise timer opens the feedback path -- and then every one of the
 	// 16 bits is replaced in one go
+	//
+	// the LFO is divided down in three stages that run off the same frame
+	// clock: a 4-bit prescaler, a 15-bit coarse counter preloaded from the
+	// upper 4 bits of the rate, and a 4-bit fine counter decoded against the
+	// lower 4 bits. both the noise and the LFO are stepped a frame at a time
+	// here because in waveform 3 the LFO latches the noise register, and
+	// which of the sample's two frames that happens in decides whether it
+	// sees the value from before or after the noise advances
 	uint32_t freq = noise_frequency();
-	for (int rep = 0; rep < 2; rep++)
+	uint32_t rate = lfo_rate();
+	for (int frame = 0; frame < 2; frame++)
 	{
-		// the 5-bit noise timer counts once per frame, so twice per sample,
-		// and matches for the whole of the frame it lands on
+		// run the divider first so we know whether this frame clocks the LFO
+		bool latch = false;
+		if (++m_lfo_prescaler == 16)
+		{
+			m_lfo_prescaler = 0;
+
+			// the coarse counter reloads on overflow, giving 2^(15-hi) ticks
+			// -- 8*2^(15-hi) samples -- per LFO clock
+			if (++m_lfo_coarse >= 0x8000)
+			{
+				m_lfo_coarse = s_lfo_preload[bitfield(rate, 4, 4)];
+
+				// each coarse carry also steps the fine counter; decoding it
+				// against the low 4 bits of the rate inserts an extra LFO
+				// clock one frame later, adding lo extra clocks per 16
+				// carries, which is what makes the average rate (16+lo)/16
+				// times the coarse rate
+				uint32_t step = 1;
+				if (bitfield(m_lfo_fine, 0) == 0)
+					step += bitfield(rate, 3);
+				else if (bitfield(m_lfo_fine, 1) == 0)
+					step += bitfield(rate, 2);
+				else if (bitfield(m_lfo_fine, 2) == 0)
+					step += bitfield(rate, 1);
+				else if (bitfield(m_lfo_fine, 3) == 0)
+					step += bitfield(rate, 0);
+				m_lfo_fine = (m_lfo_fine + 1) & 15;
+
+				// the extra clock lands within the same sample as the coarse
+				// one, so the phase can advance by 2 at once
+				m_lfo_phase = (m_lfo_phase + step) & 0xff;
+				latch = true;
+			}
+		}
+
+		// the 5-bit noise timer counts once per frame and matches for the
+		// whole of the frame it lands on
 		bool update = (m_noise_counter == freq);
 		m_noise_counter = update ? 0 : (m_noise_counter + 1);
-		if (update)
-			for (int step = 0; step < 16; step++)
-			{
-				// feedback is bit 2 XORed against the bit that fell off the
-				// bottom one step earlier; expanded over time that is the
-				// same x^17 + x^14 sequence as an explicit 17-bit LFSR, with
-				// the extra bit of state living in m_noise_flag. the chip
-				// breaks the all-zero lockup by forcing a 1 instead of by
-				// using XNOR feedback, so its period is 2^17, not 2^17-1
-				uint32_t feedback = (m_noise_flag ^ bitfield(m_noise_lfsr, 2)) |
-					(m_noise_lfsr == 0 && m_noise_flag == 0);
-				m_noise_flag = bitfield(m_noise_lfsr, 0);
-				m_noise_lfsr = (m_noise_lfsr >> 1) | (feedback << 15);
-			}
+
+		// a frame with no feedback running is 16 rotations of a 16-bit
+		// register, which leaves it exactly where it started
+		if (!update)
+		{
+			if (latch)
+				m_lfo_noise = m_noise_lfsr;
+			continue;
+		}
+
+		// the LFO's load window opens a couple of phi1 after the noise
+		// timer's, so when both land on the same frame the last bits the
+		// noise shifts in arrive too late for the LFO to pick them up
+		uint32_t seen = latch ? 16 - s_lfo_noise_lag : 16;
+		for (uint32_t step = 0; step < 16; step++)
+		{
+			if (step == seen)
+				m_lfo_noise = m_noise_lfsr;
+			step_noise();
+		}
 	}
 
 	// the noise operator samples the register at a fixed point once per
 	// sample; between updates the register is unchanged at that point, so
 	// this ends up latching at the noise frequency on its own
 	m_noise_state = bitfield(m_noise_lfsr, 1);
-
-	// the chip divides the LFO down in three stages: a 4-bit prescaler
-	// clocked once per internal frame (16 phi1), a 15-bit coarse counter
-	// preloaded from the upper 4 bits of the rate, and a 4-bit fine counter
-	// decoded against the lower 4 bits of the rate; a sample is 2 frames, so
-	// the prescaler carries once every 8 samples
-	uint32_t rate = lfo_rate();
-	m_lfo_prescaler = (m_lfo_prescaler + 2) & 15;
-	if (m_lfo_prescaler == 0)
-	{
-		// the coarse counter reloads on overflow, giving 2^(15-hi) ticks --
-		// 8*2^(15-hi) samples -- per LFO clock
-		if (++m_lfo_coarse >= 0x8000)
-		{
-			m_lfo_coarse = s_lfo_preload[bitfield(rate, 4, 4)];
-
-			// each coarse carry also steps the fine counter; decoding it
-			// against the low 4 bits of the rate inserts an extra LFO clock
-			// one frame later, adding lo extra clocks per 16 carries, which
-			// is what makes the average rate (16+lo)/16 times the coarse rate
-			uint32_t step = 1;
-			if (bitfield(m_lfo_fine, 0) == 0)
-				step += bitfield(rate, 3);
-			else if (bitfield(m_lfo_fine, 1) == 0)
-				step += bitfield(rate, 2);
-			else if (bitfield(m_lfo_fine, 2) == 0)
-				step += bitfield(rate, 1);
-			else if (bitfield(m_lfo_fine, 3) == 0)
-				step += bitfield(rate, 0);
-			m_lfo_fine = (m_lfo_fine + 1) & 15;
-
-			// the extra clock lands within the same sample as the coarse one,
-			// so the phase can advance by 2 at once
-			m_lfo_phase = (m_lfo_phase + step) & 0xff;
-		}
-	}
 
 	// bit 1 of the test register is officially undocumented but has been
 	// discovered to hold the LFO in reset while active; on the chip it forces
@@ -295,11 +344,12 @@ int32_t opm_registers::clock_noise_and_lfo()
 	// now pull out the LFO value
 	uint32_t lfo = m_lfo_phase;
 
-	// fill in the noise entry 1 ahead of our current position; this
-	// ensures the current value remains stable for a full LFO clock
-	// and effectively latches the running value when the LFO advances
-	uint32_t lfo_noise = bitfield(m_noise_lfsr, 0, 8);
-	m_lfo_waveform[3][(lfo + 1) & 0xff] = lfo_noise | (lfo_noise << 8);
+	// waveform 3 runs the noise word through the same value path the sawtooth
+	// uses, so its entry is just the sawtooth entry looked up with a slice of
+	// the noise standing in for the phase
+	uint32_t rotated = (m_lfo_noise >> s_lfo_noise_shift) |
+		(m_lfo_noise << (16 - s_lfo_noise_shift));
+	m_lfo_waveform[3][lfo] = m_lfo_waveform[0][bitfield(rotated, 0, 8)];
 
 	// fetch the AM/PM values based on the waveform; AM is unsigned in bits
 	// 0-7, while PM is a magnitude in bits 8-15 plus a sign in bit 16
