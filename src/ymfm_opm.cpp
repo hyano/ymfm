@@ -174,6 +174,11 @@ bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint3
 	else if (index != 0x1a)
 		m_regdata[index] = data;
 
+	// writing the LFO rate reloads the coarse counter, so the LFO stops
+	// advancing entirely if writes keep arriving faster than it can overflow
+	if (index == 0x18)
+		m_lfo_coarse = s_lfo_preload[bitfield(data, 4, 4)];
+
 	// handle writes to the key on index
 	if (index == 0x08)
 	{
