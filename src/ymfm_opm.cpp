@@ -77,24 +77,30 @@ opm_registers::opm_registers() :
 	for (uint32_t index = 0; index < WAVEFORM_LENGTH; index++)
 		m_waveform[0][index] = abs_sin_attenuation(index) | (bitfield(index, 9) << 15);
 
-	// create the LFO waveforms; AM in the low 8 bits, PM in the upper 8
+	// create the LFO waveforms; AM in bits 0-7, PM magnitude in bits 8-15 and
+	// PM sign in bit 16. the chip emits PM as a sign plus a magnitude rather
+	// than as a two's complement value, so the sign has to be kept out of the
+	// depth multiply -- otherwise the negative half comes out a step off
 	// waveforms are adjusted to match the pictures in the application manual
 	for (uint32_t index = 0; index < LFO_WAVEFORM_LENGTH; index++)
 	{
 		// waveform 0 is a sawtooth
-		uint8_t am = index ^ 0xff;
-		uint8_t pm = index;
-		m_lfo_waveform[0][index] = am | (pm << 8);
+		uint32_t am = index ^ 0xff;
+		uint32_t sign = bitfield(index, 7);
+		uint32_t mag = sign ? (index ^ 0xff) : index;
+		m_lfo_waveform[0][index] = am | (mag << 8) | (sign << 16);
 
-		// waveform 1 is a square wave
+		// waveform 1 is a square wave; its PM is not taken from the phase at
+		// all, so the magnitude is the same on both halves
 		am = bitfield(index, 7) ? 0 : 0xff;
-		pm = am ^ 0x80;
-		m_lfo_waveform[1][index] = am | (pm << 8);
+		m_lfo_waveform[1][index] = am | (0x80 << 8) | (bitfield(index, 7) << 16);
 
 		// waveform 2 is a triangle wave
-		am = bitfield(index, 7) ? (index << 1) : ((index ^ 0xff) << 1);
-		pm = bitfield(index, 6) ? am : ~am;
-		m_lfo_waveform[2][index] = am | (pm << 8);
+		am = (bitfield(index, 7) ? (index << 1) : ((index ^ 0xff) << 1)) & 0xff;
+		uint32_t pm = (bitfield(index, 6) ? am : ~am) & 0xff;
+		sign = bitfield(pm, 7);
+		mag = sign ? (0x100 - pm) : pm;
+		m_lfo_waveform[2][index] = am | (mag << 8) | (sign << 16);
 
 		// waveform 3 is noise; it is filled in dynamically
 		m_lfo_waveform[3][index] = 0;
@@ -295,16 +301,16 @@ int32_t opm_registers::clock_noise_and_lfo()
 	uint32_t lfo_noise = bitfield(m_noise_lfsr, 0, 8);
 	m_lfo_waveform[3][(lfo + 1) & 0xff] = lfo_noise | (lfo_noise << 8);
 
-	// fetch the AM/PM values based on the waveform; AM is unsigned and
-	// encoded in the low 8 bits, while PM signed and encoded in the upper
-	// 8 bits
-	int32_t ampm = m_lfo_waveform[lfo_waveform()][lfo];
+	// fetch the AM/PM values based on the waveform; AM is unsigned in bits
+	// 0-7, while PM is a magnitude in bits 8-15 plus a sign in bit 16
+	uint32_t ampm = m_lfo_waveform[lfo_waveform()][lfo];
 
 	// apply depth to the AM value and store for later
-	m_lfo_am = ((ampm & 0xff) * lfo_am_depth()) >> 7;
+	m_lfo_am = (bitfield(ampm, 0, 8) * lfo_am_depth()) >> 7;
 
-	// apply depth to the PM value and return it
-	return ((ampm >> 8) * int32_t(lfo_pm_depth())) >> 7;
+	// apply depth to the PM magnitude, then attach the sign
+	int32_t pm = (bitfield(ampm, 8, 8) * lfo_pm_depth()) >> 7;
+	return bitfield(ampm, 16) ? -pm : pm;
 }
 
 

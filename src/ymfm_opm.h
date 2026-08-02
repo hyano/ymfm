@@ -182,7 +182,9 @@ public:
 	// recompute it from the current phase for debugging
 	int32_t debug_lfo_pm() const
 	{
-		return ((m_lfo_waveform[lfo_waveform()][m_lfo_phase] >> 8) * int32_t(lfo_pm_depth())) >> 7;
+		uint32_t ampm = m_lfo_waveform[lfo_waveform()][m_lfo_phase];
+		int32_t pm = (bitfield(ampm, 8, 8) * lfo_pm_depth()) >> 7;
+		return bitfield(ampm, 16) ? -pm : pm;
 	}
 
 	// system-wide registers
@@ -255,7 +257,7 @@ protected:
 	uint8_t m_noise_lfo;                  // latched LFO noise value
 	uint8_t m_lfo_am;                     // current LFO AM value
 	uint8_t m_regdata[REGISTERS];         // register data
-	int16_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in low 8, PM in upper 8
+	uint32_t m_lfo_waveform[4][LFO_WAVEFORM_LENGTH]; // LFO waveforms; AM in bits 0-7, PM magnitude in 8-15, PM sign in 16
 	uint16_t m_waveform[WAVEFORMS][WAVEFORM_LENGTH]; // waveforms
 };
 
