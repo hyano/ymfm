@@ -62,7 +62,8 @@ static uint16_t const s_lfo_preload[16] =
 //-------------------------------------------------
 
 opm_registers::opm_registers() :
-	m_noise_lfsr(1),
+	m_noise_lfsr(0),
+	m_noise_flag(0),
 	m_lfo_coarse(0),
 	m_lfo_prescaler(0),
 	m_lfo_fine(0),
@@ -109,6 +110,13 @@ void opm_registers::reset()
 {
 	std::fill_n(&m_regdata[0], REGISTERS, 0);
 
+	// reset clears the noise LFSR and its timer on the chip; the all-zero
+	// state is escaped by the feedback's zero detect, so starting there is
+	// safe and makes the noise sequence reproducible from reset
+	m_noise_lfsr = 0;
+	m_noise_flag = 0;
+	m_noise_counter = 0;
+
 	// enable output on both channels by default
 	m_regdata[0x20] = m_regdata[0x21] = m_regdata[0x22] = m_regdata[0x23] = 0xc0;
 	m_regdata[0x24] = m_regdata[0x25] = m_regdata[0x26] = m_regdata[0x27] = 0xc0;
@@ -127,6 +135,7 @@ void opm_registers::save_restore(ymfm_saved_state &state)
 	state.save_restore(m_lfo_phase);
 	state.save_restore(m_lfo_am);
 	state.save_restore(m_noise_lfsr);
+	state.save_restore(m_noise_flag);
 	state.save_restore(m_noise_counter);
 	state.save_restore(m_noise_state);
 	state.save_restore(m_noise_lfo);
@@ -202,25 +211,38 @@ bool opm_registers::write(uint16_t index, uint8_t data, uint32_t &channel, uint3
 
 int32_t opm_registers::clock_noise_and_lfo()
 {
-	// base noise frequency is measured at 2x 1/2 FM frequency; this
-	// means each tick counts as two steps against the noise counter
+	// the noise LFSR is a 16-bit register that rotates once per phi1; since
+	// an internal frame is 16 phi1 it comes all the way back around every
+	// frame, so its contents only actually change during the frames where
+	// the noise timer opens the feedback path -- and then every one of the
+	// 16 bits is replaced in one go
 	uint32_t freq = noise_frequency();
 	for (int rep = 0; rep < 2; rep++)
 	{
-		// evidence seems to suggest the LFSR is clocked continually and just
-		// sampled at the noise frequency for output purposes; note that the
-		// low 8 bits are the most recent 8 bits of history while bits 8-24
-		// contain the 17 bit LFSR state
-		m_noise_lfsr <<= 1;
-		m_noise_lfsr |= bitfield(m_noise_lfsr, 17) ^ bitfield(m_noise_lfsr, 14) ^ 1;
-
-		// compare against the frequency and latch when we exceed it
-		if (m_noise_counter++ >= freq)
-		{
-			m_noise_counter = 0;
-			m_noise_state = bitfield(m_noise_lfsr, 17);
-		}
+		// the 5-bit noise timer counts once per frame, so twice per sample,
+		// and matches for the whole of the frame it lands on
+		bool update = (m_noise_counter == freq);
+		m_noise_counter = update ? 0 : (m_noise_counter + 1);
+		if (update)
+			for (int step = 0; step < 16; step++)
+			{
+				// feedback is bit 2 XORed against the bit that fell off the
+				// bottom one step earlier; expanded over time that is the
+				// same x^17 + x^14 sequence as an explicit 17-bit LFSR, with
+				// the extra bit of state living in m_noise_flag. the chip
+				// breaks the all-zero lockup by forcing a 1 instead of by
+				// using XNOR feedback, so its period is 2^17, not 2^17-1
+				uint32_t feedback = (m_noise_flag ^ bitfield(m_noise_lfsr, 2)) |
+					(m_noise_lfsr == 0 && m_noise_flag == 0);
+				m_noise_flag = bitfield(m_noise_lfsr, 0);
+				m_noise_lfsr = (m_noise_lfsr >> 1) | (feedback << 15);
+			}
 	}
+
+	// the noise operator samples the register at a fixed point once per
+	// sample; between updates the register is unchanged at that point, so
+	// this ends up latching at the noise frequency on its own
+	m_noise_state = bitfield(m_noise_lfsr, 1);
 
 	// the chip divides the LFO down in three stages: a 4-bit prescaler
 	// clocked once per internal frame (16 phi1), a 15-bit coarse counter
@@ -270,7 +292,7 @@ int32_t opm_registers::clock_noise_and_lfo()
 	// fill in the noise entry 1 ahead of our current position; this
 	// ensures the current value remains stable for a full LFO clock
 	// and effectively latches the running value when the LFO advances
-	uint32_t lfo_noise = bitfield(m_noise_lfsr, 17, 8);
+	uint32_t lfo_noise = bitfield(m_noise_lfsr, 0, 8);
 	m_lfo_waveform[3][(lfo + 1) & 0xff] = lfo_noise | (lfo_noise << 8);
 
 	// fetch the AM/PM values based on the waveform; AM is unsigned and

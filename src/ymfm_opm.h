@@ -244,7 +244,8 @@ protected:
 	}
 
 	// internal state
-	uint32_t m_noise_lfsr;                // noise LFSR state
+	uint32_t m_noise_lfsr;                // noise LFSR state (16 bits)
+	uint8_t m_noise_flag;                 // noise LFSR feedback flag (17th bit)
 	uint16_t m_lfo_coarse;                // LFO coarse counter (15 bits)
 	uint8_t m_lfo_prescaler;              // LFO prescaler (4 bits)
 	uint8_t m_lfo_fine;                   // LFO fine counter (4 bits)
